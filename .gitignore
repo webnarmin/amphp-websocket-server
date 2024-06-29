@@ -1,0 +1,17 @@
+# Ignore Composer dependencies
+/vendor/
+
+# Ignore PHPUnit cache and test results
+/.phpunit.result.cache
+
+# Ignore system files
+.DS_Store
+Thumbs.db
+
+# Ignore IDE/editor specific files
+.idea/
+.vscode/
+*.iml
+
+# Ignore composer lock file
+composer.lock
