@@ -1,4 +1,6 @@
-<?php declare(strict_types=1);
+<?php
+
+declare(strict_types=1);
 
 namespace webnarmin\AmphpWS;
 
@@ -31,7 +33,7 @@ class Configurator
 
         $config = require $filePath;
         if (!is_array($config)) {
-            throw new \RuntimeException("Configuration file must return an array");
+            throw new \RuntimeException('Configuration file must return an array');
         }
 
         return new self($config);

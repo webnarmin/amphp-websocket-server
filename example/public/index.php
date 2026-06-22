@@ -1,14 +1,12 @@
 <?php
 
-use webnarmin\Cryptor\Cryptor;
-
 require '../../vendor/autoload.php';
 
-$cryptor = new Cryptor('websocket-private-key');
-$publicKey = 'websocket-public-key';
+use webnarmin\AmphpWS\Simple\SimpleAuthenticator;
 
 $userId = time();
-$websocketToken = $cryptor->encrypt($userId, $publicKey);
+$authenticator = new SimpleAuthenticator('control-http-auth-token', 'websocket-signing-secret');
+$websocketToken = $authenticator->issueWebSocketToken($userId);
 
 ?><!DOCTYPE html>
 <html lang="en">
@@ -55,7 +53,7 @@ $websocketToken = $cryptor->encrypt($userId, $publicKey);
         }
 
         connectBtn.addEventListener('click', () => {
-            socket = new WebSocket('ws://127.0.0.1:1337/ws?token=<?= $websocketToken ?>&publicKey=<?= $publicKey ?>');
+            socket = new WebSocket('ws://127.0.0.1:1337/ws?token=<?= $websocketToken ?>');
 
             socket.onopen = () => {
                 addMessage('Connected to server');
@@ -85,7 +83,12 @@ $websocketToken = $cryptor->encrypt($userId, $publicKey);
         sendEchoBtn.addEventListener('click', () => {
             if (socket && socket.readyState === WebSocket.OPEN) {
                 const message = messageInput.value;
-                socket.send(JSON.stringify({action: 'echo', payload: {message}}));
+                socket.send(JSON.stringify({
+                    action: 'echo',
+                    payload: {message},
+                    requestId: crypto.randomUUID(),
+                    metadata: {source: 'browser'}
+                }));
                 addMessage(`Sent echo: ${message}`);
                 messageInput.value = '';
             } else {
@@ -96,7 +99,12 @@ $websocketToken = $cryptor->encrypt($userId, $publicKey);
         sendSumBtn.addEventListener('click', () => {
             if (socket && socket.readyState === WebSocket.OPEN) {
                 const numbers = messageInput.value.split(',').map(Number);
-                socket.send(JSON.stringify({action: 'sum', payload: {numbers}}));
+                socket.send(JSON.stringify({
+                    action: 'sum',
+                    payload: {numbers},
+                    requestId: crypto.randomUUID(),
+                    metadata: {source: 'browser'}
+                }));
                 addMessage(`Sent sum request: ${numbers.join(', ')}`);
                 messageInput.value = '';
             } else {
@@ -107,7 +115,12 @@ $websocketToken = $cryptor->encrypt($userId, $publicKey);
         sendAllBtn.addEventListener('click', () => {
             if (socket && socket.readyState === WebSocket.OPEN) {
                 const message = messageInput.value;
-                socket.send(JSON.stringify({action: 'broadcast', payload: {message}}));
+                socket.send(JSON.stringify({
+                    action: 'broadcast',
+                    payload: {message},
+                    requestId: crypto.randomUUID(),
+                    metadata: {source: 'browser'}
+                }));
                 addMessage(`Sent all: ${message}`);
                 messageInput.value = '';
             } else {

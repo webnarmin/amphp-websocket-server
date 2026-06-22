@@ -1,29 +1,24 @@
-<?php declare(strict_types=1);
+<?php
+
+declare(strict_types=1);
 
 use GuzzleHttp\Client;
-use webnarmin\AmphpWS\WebsocketControlHttpClient;
 use Psr\Log\NullLogger;
+use webnarmin\AmphpWS\WebsocketControlHttpClient;
 
 require '../vendor/autoload.php';
 
-$baseUri = 'http://127.0.0.1:1337';
-$authToken = 'control-http-auth-token';
-
-// Create a Guzzle HTTP client instance
 $httpClient = new Client([
-    'base_uri' => $baseUri,
+    'base_uri' => 'http://127.0.0.1:1337',
     'headers' => [
-        'Authorization' => $authToken,
+        'Authorization' => 'control-http-auth-token',
         'Content-Type' => 'application/json',
     ],
 ]);
 
 $client = new WebsocketControlHttpClient($httpClient, new NullLogger());
+$result = $client->broadcastText('Hello, everyone!');
 
-$success = $client->broadcastText('Hello, everyone!');
-
-if ($success) {
-    echo "Message broadcasted successfully.";
-} else {
-    echo "Failed to broadcast message.";
-}
+echo $result->isSuccess()
+    ? "Message broadcasted successfully.\n"
+    : "Failed to broadcast message: {$result->getMessage()}\n";

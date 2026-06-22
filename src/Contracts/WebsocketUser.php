@@ -1,8 +1,10 @@
-<?php declare(strict_types=1);
+<?php
+
+declare(strict_types=1);
 
 namespace webnarmin\AmphpWS\Contracts;
 
 interface WebsocketUser
 {
-    public function getId(): ?int;
+    public function getId(): int;
 }

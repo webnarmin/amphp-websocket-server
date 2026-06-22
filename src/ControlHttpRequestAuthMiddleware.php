@@ -1,4 +1,6 @@
-<?php declare(strict_types=1);
+<?php
+
+declare(strict_types=1);
 
 namespace webnarmin\AmphpWS;
 
@@ -9,35 +11,34 @@ use Amp\Http\Server\Response;
 use Psr\Log\LoggerInterface;
 use webnarmin\AmphpWS\Contracts\Authenticator;
 
-class ControlHttpRequestAuthMiddleware implements Middleware 
+class ControlHttpRequestAuthMiddleware implements Middleware
 {
-
-    private Authenticator $authenticator;
-    private LoggerInterface $logger;
-
-    public function __construct(Authenticator $authenticator, LoggerInterface $logger) 
-    {
-        $this->authenticator = $authenticator;
-        $this->logger = $logger;
+    public function __construct(
+        private Authenticator $authenticator,
+        private LoggerInterface $logger,
+    ) {
     }
 
     public function handleRequest(Request $request, RequestHandler $next): Response
     {
-        if($request->getMethod() !== 'POST') {
-            $response = $next->handleRequest($request);
-            return $response;
+        if ($request->getMethod() !== 'POST') {
+            return $next->handleRequest($request);
         }
 
         $this->logger->info('Received control HTTP request');
 
         if (false === $this->authenticator->authenticateControlHttp($request)) {
             $this->logger->warning('Unauthorized control HTTP attempt');
-            return new Response(401, [], 'Unauthorized');
+
+            return new Response(401, ['Content-Type' => 'application/json'], json_encode([
+                'status' => 'error',
+                'error' => [
+                    'code' => 'authentication_failed',
+                    'message' => 'Unauthorized control HTTP request.',
+                ],
+            ], JSON_THROW_ON_ERROR));
         }
 
-        $response = $next->handleRequest($request);
-        
-        return $response;
+        return $next->handleRequest($request);
     }
-
 }

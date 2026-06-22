@@ -1,57 +1,61 @@
 <?php
 
+declare(strict_types=1);
+
+namespace webnarmin\AmphpWSTest\Simple;
+
 use Amp\Http\Server\Driver\Client;
+use Amp\Http\Server\Request;
 use PHPUnit\Framework\TestCase;
 use webnarmin\AmphpWS\Simple\SimpleAuthenticator;
-use webnarmin\Cryptor\Cryptor;
-use Amp\Http\Server\Request;
-use Psr\Http\Message\UriInterface;
 
-class SimpleAuthenticatorTest extends TestCase
+final class SimpleAuthenticatorTest extends TestCase
 {
-    private SimpleAuthenticator $authenticator;
-    private Cryptor $cryptor;
-
-    protected function setUp(): void
+    public function test_control_http_token_is_validated(): void
     {
-        $this->cryptor = new Cryptor('test-key');
-        $this->authenticator = new SimpleAuthenticator('test-token', $this->cryptor);
+        $authenticator = new SimpleAuthenticator('control-token', 'websocket-secret');
+
+        self::assertTrue($authenticator->authenticateControlHttp($this->request('/ws', [
+            'authorization' => ['control-token'],
+        ])));
+        self::assertFalse($authenticator->authenticateControlHttp($this->request('/ws', [
+            'authorization' => ['wrong'],
+        ])));
     }
 
-    public function testAuthenticateControlHttp()
+    public function test_websocket_token_is_issued_and_validated(): void
     {
-        $client = $this->createMock(Client::class);
-        $uri = $this->createMock(UriInterface::class);
-        $request = new Request($client, "POST", $uri, ["authorization" => ["test-token"]]);
+        $authenticator = new SimpleAuthenticator('control-token', 'websocket-secret');
+        $token = $authenticator->issueWebSocketToken(42, time() + 60);
 
-        $this->assertTrue($this->authenticator->authenticateControlHttp($request));
+        $user = $authenticator->authenticateWebSocket($this->request('/ws?token=' . urlencode($token)));
 
-        $request = new Request($client, "POST", $uri, ["authorization" => ["wrong-token"]]);
-
-        $this->assertFalse($this->authenticator->authenticateControlHttp($request));
+        self::assertNotNull($user);
+        self::assertSame(42, $user->getId());
     }
 
-    public function testAuthenticateWebSocket()
+    public function test_websocket_token_rejects_wrong_secret_and_expiration(): void
     {
-        $userId = 123;
-        $publicKey = 'test-public-key';
-        $token = $this->cryptor->encrypt($userId, $publicKey);
+        $authenticator = new SimpleAuthenticator('control-token', 'websocket-secret');
+        $token = $authenticator->issueWebSocketToken(42, time() + 60);
 
-        $client = $this->createMock(Client::class);
-        $uri = League\Uri\Http::new('/ws?token=' . urlencode($token). '&publicKey=' . urlencode($publicKey));
-        $request = new Request($client, "POST", $uri, []);
+        self::assertNull((new SimpleAuthenticator('control-token', 'wrong-secret'))
+            ->authenticateWebSocket($this->request('/ws?token=' . urlencode($token))));
 
-        $user = $this->authenticator->authenticateWebSocket($request);
+        $expiredToken = $authenticator->issueWebSocketToken(42, time() - 1);
+        self::assertNull($authenticator->authenticateWebSocket($this->request('/ws?token=' . urlencode($expiredToken))));
+    }
 
-        $this->assertNotNull($user);
-        $this->assertEquals($userId, $user->getId());
-
-        // Test with invalid token
-        $uri = League\Uri\Http::new("/test?token=invalid-token&publicKey=" . urlencode($publicKey));
-        $request = new Request($client, "GET", $uri, []);
-
-        $user = $this->authenticator->authenticateWebSocket($request);
-
-        $this->assertNull($user);
+    /**
+     * @param array<string, list<string>> $headers
+     */
+    private function request(string $target, array $headers = []): Request
+    {
+        return new Request(
+            $this->createMock(Client::class),
+            'GET',
+            \League\Uri\Http::new($target),
+            $headers,
+        );
     }
 }

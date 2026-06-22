@@ -29,7 +29,7 @@ class ConfiguratorTest extends TestCase
             'timeout' => 30,
         ];
         $configurator = new Configurator($config);
-        
+
         $this->assertEquals('127.0.0.1', $configurator->getWebSocketAddress()['host']);
         $this->assertEquals(9000, $configurator->getWebSocketAddress()['port']);
         $this->assertEquals(['http://example.com'], $configurator->getAllowOrigins());

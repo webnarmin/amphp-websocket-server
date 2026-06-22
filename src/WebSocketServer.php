@@ -1,4 +1,6 @@
-<?php declare(strict_types=1);
+<?php
+
+declare(strict_types=1);
 
 namespace webnarmin\AmphpWS;
 
@@ -9,49 +11,94 @@ use Amp\Http\Server\Middleware\AllowedMethodsMiddleware;
 use Amp\Http\Server\Request;
 use Amp\Http\Server\RequestHandler\ClosureRequestHandler;
 use Amp\Http\Server\Response;
+use Amp\Http\Server\Router;
 use Amp\Http\Server\SocketHttpServer;
 use Amp\Socket\InternetAddress;
-use Psr\Log\LoggerInterface;
-use Psr\Log\NullLogger;
-use Amp\Http\Server\Router;
 use Amp\Websocket\Server\AllowOriginAcceptor;
 use Amp\Websocket\Server\Websocket;
-use Amp\Websocket\Server\WebsocketClientGateway;
 use Amp\Websocket\Server\WebsocketClientHandler;
 use Amp\Websocket\WebsocketClient;
+use JsonException;
+use Psr\Log\LoggerInterface;
+use Psr\Log\NullLogger;
+use Throwable;
 use webnarmin\AmphpWS\Contracts\Authenticator;
 use webnarmin\AmphpWS\Contracts\WebsocketUser;
+use webnarmin\AmphpWS\Control\ControlHttpRequestValidator;
+use webnarmin\AmphpWS\Exception\AuthenticationException;
+use webnarmin\AmphpWS\Exception\ControlHttpException;
+use webnarmin\AmphpWS\Protocol\ResponseEnvelope;
 
-abstract class WebSocketServer implements WebsocketClientHandler
+class WebSocketServer implements WebsocketClientHandler
 {
-    private Configurator $configurator;
-    private Authenticator $authenticator;
     private LoggerInterface $logger;
-    protected UserAwareWebsocketClientGateway $gateway;
+    private UserAwareWebsocketClientGateway $gateway;
+    private ServerHooks $hooks;
+    private MessageProcessor $messageProcessor;
+    private ControlHttpRequestValidator $controlValidator;
 
     public function __construct(
-        Configurator $configurator,
-        Authenticator $authenticator,
-        ?LoggerInterface $logger = null
+        private Configurator $configurator,
+        private Authenticator $authenticator,
+        private ActionRouter $router,
+        ?LoggerInterface $logger = null,
+        ?ServerHooks $hooks = null,
+        ?UserAwareWebsocketClientGateway $gateway = null,
+        ?MessageProcessor $messageProcessor = null,
+        ?ControlHttpRequestValidator $controlValidator = null,
     ) {
-        $this->configurator = $configurator;
-        $this->authenticator = $authenticator;
         $this->logger = $logger ?? new NullLogger();
-        $this->gateway = new UserAwareWebsocketClientGateway(new WebsocketClientGateway());
+        $this->hooks = $hooks ?? ServerHooks::none();
+        $this->gateway = $gateway ?? new UserAwareWebsocketClientGateway();
+        $this->messageProcessor = $messageProcessor ?? new MessageProcessor($this->router, $this->logger, $this->hooks);
+        $this->controlValidator = $controlValidator ?? new ControlHttpRequestValidator();
     }
 
     public function run(): void
     {
-        $this->logger->info("Starting WebSocket server.");
+        $this->logger->info('Starting WebSocket server.');
         $server = $this->createHttpServer();
         $websocket = $this->createWebsocket($server);
-
         $router = $this->createRouter($server, $websocket);
 
         $server->start($router, new DefaultErrorHandler());
-        $this->logger->info("WebSocket server started.");
+        $this->logger->info('WebSocket server started.');
 
         $this->awaitSignalAndStopServer($server);
+    }
+
+    public function getGateway(): UserAwareWebsocketClientGateway
+    {
+        return $this->gateway;
+    }
+
+    public function processRawMessage(WebsocketUser $user, string $messageBuffer, int $clientId): ?ResponseEnvelope
+    {
+        return $this->messageProcessor->process($user, $messageBuffer, $clientId);
+    }
+
+    public function handleClient(WebsocketClient $client, Request $request, Response $response): void
+    {
+        $clientId = $client->getId();
+        $this->logger->info('New client connected.', ['client_id' => $clientId]);
+
+        $user = $this->authenticateClient($client, $request);
+        if ($user === null) {
+            return;
+        }
+
+        $this->logger->info('Client authenticated.', [
+            'client_id' => $clientId,
+            'user_id' => $user->getId(),
+        ]);
+
+        $this->gateway->addClient($client, $user);
+        $this->hooks->onAuthenticated($user, $client);
+        $client->onClose(function () use ($user, $clientId): void {
+            $this->hooks->onDisconnected($user, $clientId);
+        });
+
+        $this->processClientMessages($client, $user);
     }
 
     private function createHttpServer(): SocketHttpServer
@@ -62,20 +109,20 @@ abstract class WebSocketServer implements WebsocketClientHandler
         $sslKey = $this->configurator->getSSLKeyFile();
 
         $context = new \Amp\Socket\BindContext();
-        
+
         if ($useSSL && $sslCert && $sslKey) {
             $cert = new \Amp\Socket\Certificate($sslCert, $sslKey);
             $context = $context->withTlsContext(
-                (new \Amp\Socket\ServerTlsContext)->withDefaultCertificate($cert)
+                (new \Amp\Socket\ServerTlsContext())->withDefaultCertificate($cert)
             );
         }
 
         $server = SocketHttpServer::createForDirectAccess(
             $this->logger,
-            true, // enableCompression
+            true,
             $this->configurator->getMaxConnections(),
             $this->configurator->getMaxConnectionsPerIp(),
-            $this->configurator->getMaxConnections(), // concurrencyLimit
+            $this->configurator->getMaxConnections(),
             AllowedMethodsMiddleware::DEFAULT_ALLOWED_METHODS,
             new DefaultHttpDriverFactory(
                 $this->logger,
@@ -87,7 +134,7 @@ abstract class WebSocketServer implements WebsocketClientHandler
         $server->expose(new InternetAddress($wsAddress['host'], $wsAddress['port']), $context);
 
         $this->logger->info(
-            ($useSSL ? "Secure" : "Insecure") . 
+            ($useSSL ? 'Secure' : 'Insecure') .
             " HTTP server exposed on: {$wsAddress['host']}:{$wsAddress['port']}"
         );
 
@@ -97,61 +144,112 @@ abstract class WebSocketServer implements WebsocketClientHandler
     private function createWebsocket(SocketHttpServer $server): Websocket
     {
         $acceptor = new AllowOriginAcceptor($this->configurator->getAllowOrigins());
+
         return new Websocket($server, $this->logger, $acceptor, $this);
     }
 
     private function createRouter(SocketHttpServer $server, Websocket $websocket): Router
     {
         $router = new Router($server, $this->logger, new DefaultErrorHandler());
-    
         $router->addRoute('GET', '/ws', $websocket);
-    
-        $middleware = new ControlHttpRequestAuthMiddleware($this->authenticator, $this->logger);
-        $router->addMiddleware($middleware);
-
+        $router->addMiddleware(new ControlHttpRequestAuthMiddleware($this->authenticator, $this->logger));
         $this->addControlHttpRoutes($router);
-    
+
         return $router;
     }
 
     private function addControlHttpRoutes(Router $router): void
     {
-        $routes = [
-            'POST /send-text' => function ($data) {
-                return $this->gateway->sendText($data['payload'], $data['userId']);
-            },
-            'POST /broadcast-text' => function ($data) {
-                return $this->gateway->broadcastText($data['payload'], $data['excludedUserIds'] ?? []);
-            },
-            'POST /broadcast-binary' => function ($data) {
-                return $this->gateway->broadcastBinary(base64_decode($data['payload']), $data['excludedUserIds'] ?? []);
-            },
-            'POST /multicast-text' => function ($data) {
-                return $this->gateway->multicastText($data['payload'], $data['userIds']);
-            },
-            'POST /multicast-binary' => function ($data) {
-                return $this->gateway->multicastBinary(base64_decode($data['payload']), $data['userIds']);
-            },
-        ];
-    
-        foreach ($routes as $route => $handler) {
-            [$method, $path] = explode(' ', $route);
-            $router->addRoute($method, $path, new ClosureRequestHandler(
-                function (Request $request) use ($handler) {
-                    try {
-                        $data = json_decode($request->getBody()->buffer(), true);
-                        if (!$data) {
-                            throw new \InvalidArgumentException("Invalid JSON data");
-                        }
-                        $future = $handler($data);
-                        $future->await();
-                        return new Response(200, ['Content-Type' => 'application/json'], json_encode(['status' => 'success']));
-                    } catch (\Throwable $e) {
-                        $this->logger->error("Error processing request: " . $e->getMessage());
-                        return new Response(400, ['Content-Type' => 'application/json'], json_encode(['status' => 'error', 'message' => $e->getMessage()]));
-                    }
-                }
+        foreach ([
+            'send-text',
+            'broadcast-text',
+            'broadcast-binary',
+            'multicast-text',
+            'multicast-binary',
+        ] as $operation) {
+            $router->addRoute('POST', '/' . $operation, new ClosureRequestHandler(
+                fn (Request $request): Response => $this->handleControlHttpRequest($operation, $request)
             ));
+        }
+    }
+
+    private function handleControlHttpRequest(string $operation, Request $request): Response
+    {
+        try {
+            $data = json_decode($request->getBody()->buffer(), true, 512, JSON_THROW_ON_ERROR);
+            if (!is_array($data) || array_is_list($data)) {
+                throw new ControlHttpException('invalid_control_request', 'Control request body must be a JSON object.');
+            }
+
+            /** @var array<string, mixed> $data */
+            $validated = $this->controlValidator->validate($operation, $data);
+            $this->dispatchControlOperation($operation, $validated)->await();
+
+            return $this->jsonResponse(200, ['status' => 'success']);
+        } catch (JsonException) {
+            return $this->jsonError(400, 'invalid_json', 'Invalid JSON request body.');
+        } catch (ControlHttpException $exception) {
+            return $this->jsonError($exception->getStatusCode(), $exception->getErrorCode(), $exception->getMessage());
+        } catch (Throwable $exception) {
+            $this->logger->error('Error processing control HTTP request.', [
+                'operation' => $operation,
+                'message' => $exception->getMessage(),
+            ]);
+
+            return $this->jsonError(400, 'invalid_control_request', $exception->getMessage());
+        }
+    }
+
+    /**
+     * @param array<string, mixed> $data
+     */
+    private function dispatchControlOperation(string $operation, array $data): \Amp\Future
+    {
+        return match ($operation) {
+            'send-text' => $this->gateway->sendText($data['userId'], $data['payload']),
+            'broadcast-text' => $this->gateway->broadcastText($data['payload'], $data['excludedUserIds']),
+            'broadcast-binary' => $this->gateway->broadcastBinary($data['payload'], $data['excludedUserIds']),
+            'multicast-text' => $this->gateway->multicastText($data['payload'], $data['userIds']),
+            'multicast-binary' => $this->gateway->multicastBinary($data['payload'], $data['userIds']),
+            default => throw new ControlHttpException(
+                'invalid_control_request',
+                "Unsupported control operation '{$operation}'.",
+                404,
+            ),
+        };
+    }
+
+    private function authenticateClient(WebsocketClient $client, Request $request): ?WebsocketUser
+    {
+        $user = $this->authenticator->authenticateWebSocket($request);
+        if ($user !== null) {
+            return $user;
+        }
+
+        $exception = new AuthenticationException($client->getId());
+        $this->logger->warning($exception->getMessage(), ['client_id' => $client->getId()]);
+        $this->hooks->onUnhandledException(null, $client->getId(), $exception);
+        $client->close(1008, 'Authentication failed');
+
+        return null;
+    }
+
+    private function processClientMessages(WebsocketClient $client, WebsocketUser $user): void
+    {
+        try {
+            while ($message = $client->receive()) {
+                $response = $this->processRawMessage($user, $message->buffer(), $client->getId());
+                if ($response !== null) {
+                    $this->gateway->sendText($user->getId(), $response->toJson())->await();
+                }
+            }
+        } catch (Throwable $exception) {
+            $this->logger->error('Error processing client messages.', [
+                'client_id' => $client->getId(),
+                'user_id' => $user->getId(),
+                'message' => $exception->getMessage(),
+            ]);
+            $this->hooks->onUnhandledException($user, $client->getId(), $exception);
         }
     }
 
@@ -160,90 +258,29 @@ abstract class WebSocketServer implements WebsocketClientHandler
         $signal = \Amp\trapSignal([SIGINT, SIGTERM]);
         $this->logger->info("Signal received ({$signal}), stopping server.");
         $server->stop();
-        $this->logger->info("Server stopped.");
+        $this->logger->info('Server stopped.');
     }
 
-    public function handleClient(WebsocketClient $client, Request $request, Response $response): void
+    /**
+     * @param array<string, mixed> $body
+     */
+    private function jsonResponse(int $status, array $body): Response
     {
-        $clientId = $client->getId();
-        $this->logger->info("New client connected. ID: {$clientId}");
-
-        if ($user = $this->authenticateClient($client, $request)) {
-            $this->logger->info("Client authenticated. ID: {$clientId}, User ID: {$user->getId()}");
-            $this->processClientMessages($client);
-        } else {
-            $this->logger->warning("Client authentication failed. ID: {$clientId}");
-        }
+        return new Response(
+            $status,
+            ['Content-Type' => 'application/json'],
+            json_encode($body, JSON_THROW_ON_ERROR)
+        );
     }
 
-    private function authenticateClient(WebsocketClient $client, Request $request): ?WebsocketUser
+    private function jsonError(int $status, string $code, string $message): Response
     {
-        $user = $this->authenticator->authenticateWebSocket($request);
-
-        if (!$user || $user->getId() === null) {
-            $client->close(1008, 'Authentication failed');
-            return null;
-        }
-
-        $this->gateway->addClient($client, $user);
-        return $user;
-    }
-
-    private function processClientMessages(WebsocketClient $client): void
-    {
-        try {
-            while ($message = $client->receive()) {
-                $this->handleClientMessage($client, $message->buffer());
-            }
-        } catch (\Exception $e) {
-            $this->logger->error("Error processing messages for client. ID: " . $client->getId() . ". Error: " . $e->getMessage());
-        }
-    }
-
-    private function handleClientMessage(WebsocketClient $client, string $messageBuffer): void
-    {
-        $data = json_decode($messageBuffer, true);
-        if ($this->isValidMessage($data)) {
-            $this->processMessageAction($client, $data);
-        } else {
-            $this->logger->warning("Invalid message from client. ID: " . $client->getId());
-            $userId = $this->gateway->getUserIdByClientId($client->getId());
-            $this->gateway->sendText(json_encode(['status' => 'error', 'payload' => "Invalid request"]), $userId);
-        }
-    }
-
-    private function isValidMessage(?array $data): bool
-    {
-        return $data && isset($data['action'], $data['payload']);
-    }
-
-    private function processMessageAction(WebsocketClient $client, array $data): void
-    {
-        $methodName = 'handle' . str_replace(' ', '', ucwords(str_replace('_', ' ', $data['action'])));
-
-        if (method_exists($this, $methodName)) {
-            $this->executeMessageAction($client, $methodName, $data['payload']);
-        } else {
-            $userId = $this->gateway->getUserIdByClientId($client->getId());
-            $this->logger->warning("Unsupported action: " . $data['action'] . ". Client ID: " . $client->getId() . ", User ID: " . $userId);
-            $this->gateway->sendText(json_encode(['status' => 'error', 'payload' => "Action not supported"]), $userId);
-        }
-    }
-
-    private function executeMessageAction(WebsocketClient $client, string $methodName, array $payload): void
-    {
-        $clientId = $client->getId();
-        $userId = $this->gateway->getUserIdByClientId($clientId);
-        $user = $this->gateway->getUserByClientId($clientId);
-
-        try {
-            $result = $this->$methodName($user, $payload);
-            if($result) {
-                $this->gateway->sendText(json_encode(['status' => 'success', 'payload' => $result]), $userId);
-            }
-        } catch (\Exception $e) {
-            $this->logger->error("Error executing action. Client ID: {$clientId}, User ID: {$userId}, Action: {$methodName}, Error: " . $e->getMessage());
-            $this->gateway->sendText(json_encode(['status' => 'error', 'payload' => "Error processing request: " . $e->getMessage()]), $userId);
-        }
+        return $this->jsonResponse($status, [
+            'status' => 'error',
+            'error' => [
+                'code' => $code,
+                'message' => $message,
+            ],
+        ]);
     }
 }

@@ -1,4 +1,6 @@
-<?php declare(strict_types=1);
+<?php
+
+declare(strict_types=1);
 
 namespace webnarmin\AmphpWS;
 
@@ -6,6 +8,7 @@ use GuzzleHttp\ClientInterface;
 use GuzzleHttp\Exception\GuzzleException;
 use Psr\Log\LoggerInterface;
 use Psr\Log\NullLogger;
+use webnarmin\AmphpWS\Control\ControlResult;
 
 class WebsocketControlHttpClient
 {
@@ -18,7 +21,7 @@ class WebsocketControlHttpClient
         $this->logger = $logger ?? new NullLogger();
     }
 
-    public function sendText(int $userId, string $payload): bool
+    public function sendText(int $userId, string $payload): ControlResult
     {
         return $this->sendRequest('POST', '/send-text', [
             'userId' => $userId,
@@ -26,7 +29,7 @@ class WebsocketControlHttpClient
         ]);
     }
 
-    public function broadcastText(string $payload, array $excludedUserIds = []): bool
+    public function broadcastText(string $payload, array $excludedUserIds = []): ControlResult
     {
         return $this->sendRequest('POST', '/broadcast-text', [
             'payload' => $payload,
@@ -34,7 +37,7 @@ class WebsocketControlHttpClient
         ]);
     }
 
-    public function broadcastBinary(string $payload, array $excludedUserIds = []): bool
+    public function broadcastBinary(string $payload, array $excludedUserIds = []): ControlResult
     {
         return $this->sendRequest('POST', '/broadcast-binary', [
             'payload' => base64_encode($payload),
@@ -42,7 +45,7 @@ class WebsocketControlHttpClient
         ]);
     }
 
-    public function multicastText(string $payload, array $userIds): bool
+    public function multicastText(string $payload, array $userIds): ControlResult
     {
         return $this->sendRequest('POST', '/multicast-text', [
             'payload' => $payload,
@@ -50,7 +53,7 @@ class WebsocketControlHttpClient
         ]);
     }
 
-    public function multicastBinary(string $payload, array $userIds): bool
+    public function multicastBinary(string $payload, array $userIds): ControlResult
     {
         return $this->sendRequest('POST', '/multicast-binary', [
             'payload' => base64_encode($payload),
@@ -58,22 +61,24 @@ class WebsocketControlHttpClient
         ]);
     }
 
-    private function sendRequest(string $method, string $endpoint, array $data): bool
+    private function sendRequest(string $method, string $endpoint, array $data): ControlResult
     {
-        $this->logger->info("Attempting to send request", ['method' => $method, 'endpoint' => $endpoint]);
+        $this->logger->info('Attempting to send request', ['method' => $method, 'endpoint' => $endpoint]);
         try {
             $response = $this->client->request($method, $endpoint, [
-                'json' => $data
+                'json' => $data,
             ]);
-            $statusCode = $response->getStatusCode();
-            $this->logger->info("Request sent successfully", ['statusCode' => $statusCode]);
-            return $statusCode === 200;
+            $result = ControlResult::fromResponse($response);
+            $this->logger->info('Request completed', ['statusCode' => $result->getStatusCode()]);
+
+            return $result;
         } catch (GuzzleException $e) {
-            $this->logger->error("Failed to send request", [
+            $this->logger->error('Failed to send request', [
                 'error' => $e->getMessage(),
                 'code' => $e->getCode(),
             ]);
-            return false;
+
+            return ControlResult::failure(null, 'request_failed', $e->getMessage());
         }
     }
 }

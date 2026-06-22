@@ -1,31 +1,19 @@
 # AmPHP WebSocket Server
 
-A flexible and efficient WebSocket server implementation using the Amp concurrency framework for PHP. This library enables developers to create real-time, interactive web applications with ease, providing features such as authentication, message handling, broadcasting, and more. It is designed to be scalable and efficient, making it ideal for high-performance applications.
+Authenticated WebSocket transport runtime on top of Amp.
 
-## Features
+This package provides:
 
-- **Easy Setup**: Minimal configuration required to start.
-- **Authentication**: Supports authentication for WebSocket and HTTP control requests.
-- **Message Handling**: Customizable actions for client messages.
-- **Broadcasting**: Send messages to multiple clients at once.
-- **Secure Connections**: Optional SSL/TLS support.
-- **Extensible**: Easily extend and customize.
+- WebSocket server bootstrap using `amphp/websocket-server`.
+- Authentication for WebSocket clients and HTTP control requests.
+- Strict JSON message envelopes.
+- Explicit action routing.
+- User-aware gateway for direct, multicast and broadcast delivery.
+- HTTP control endpoints for pushing messages from another process.
 
-## Table of Contents
-
-- [Installation](#installation)
-- [Quick Start](#quick-start)
-- [Usage](#usage)
-  - [Server-side Setup](#server-side-setup)
-  - [Client-side Usage](#client-side-usage)
-  - [Broadcasting from CLI](#broadcasting-from-cli)
-- [Configuration](#configuration)
-- [Contributing](#contributing)
-- [License](#license)
+It does not provide application-level chat flows, UI rendering, persistence, rooms, bot logic or framework-specific abstractions. Libraries such as ChatFlow can use this package as a transport layer.
 
 ## Installation
-
-Install via Composer:
 
 ```bash
 composer require webnarmin/amphp-websocket-server
@@ -33,209 +21,177 @@ composer require webnarmin/amphp-websocket-server
 
 ## Quick Start
 
-### 1. Create a WebSocket Server Class
-
-First, extend the `WebSocketServer` class and define your message handlers:
-
 ```php
-use webnarmin\AmphpWS\WebSocketServer;
-use webnarmin\AmphpWS\Contracts\WebsocketUser;
-
-class MyWebSocketServer extends WebSocketServer
-{
-    protected function handleEcho(WebsocketUser $user, array $payload): array
-    {
-        return ['message' => 'Echo: ' . $payload['message']];
-    }
-
-    protected function handleSum(WebsocketUser $user, array $payload): array
-    {
-        $numbers = $payload['numbers'] ?? [];
-        $sum = array_sum($numbers);
-        return ['result' => $sum];
-    }
-}
-```
-
-### 2. Set Up and Run the Server
-
-Next, configure and run your WebSocket server:
-
-```php
+use webnarmin\AmphpWS\ActionRouter;
 use webnarmin\AmphpWS\Configurator;
+use webnarmin\AmphpWS\Protocol\ResponseEnvelope;
 use webnarmin\AmphpWS\Simple\SimpleAuthenticator;
-use webnarmin\Cryptor\Cryptor;
+use webnarmin\AmphpWS\WebSocketServer;
 
-$config = [
-    'websocket' => ['host' => '127.0.0.1', 'port' => 1337],
-    'allow_origins' => ['http://127.0.0.1:8000', 'http://localhost:8000'],
-];
-$configurator = new Configurator($config);
-$cryptor = new Cryptor('your-private-key');
-$authenticator = new SimpleAuthenticator('control-http-auth-token', $cryptor);
+$router = new ActionRouter();
 
-$server = new MyWebSocketServer($configurator, $authenticator);
+$router->on('echo', static function ($user, $message): ResponseEnvelope {
+    return ResponseEnvelope::success([
+        'message' => 'Echo: ' . ($message->getPayload()['message'] ?? ''),
+    ]);
+});
+
+$server = new WebSocketServer(
+    new Configurator([
+        'websocket' => ['host' => '127.0.0.1', 'port' => 1337],
+        'allow_origins' => ['http://127.0.0.1:8000'],
+    ]),
+    new SimpleAuthenticator('control-http-auth-token', 'websocket-signing-secret'),
+    $router,
+);
+
 $server->run();
 ```
 
-### Note on `SimpleAuthenticator` and `SimpleWebsocketUser`
+## Message Protocol
 
-The classes `SimpleAuthenticator` and `SimpleWebsocketUser` are provided as basic examples. They cover essential functionalities but can be extended or replaced with custom implementations to fit specific needs.
+Clients send JSON objects:
 
-## Usage
-
-### Server-side Setup
-
-To create a custom WebSocket server, extend the `WebSocketServer` class and implement your desired message handlers:
-
-```php
-class MyWebSocketServer extends WebSocketServer
+```json
 {
-    protected function handleEcho(WebsocketUser $user, array $payload): array
-    {
-        return ['message' => 'Echo: ' . $payload['message']];
-    }
-
-    protected function handleSum(WebsocketUser $user, array $payload): array
-    {
-        $numbers = $payload['numbers'] ?? [];
-        $sum = array_sum($numbers);
-        return ['result' => $sum];
-    }
+  "action": "echo",
+  "payload": {"message": "Hello"},
+  "requestId": "req-1",
+  "metadata": {"source": "browser"}
 }
 ```
 
-### Client-side Usage
+Rules:
 
-Connect to the WebSocket server from your client-side JavaScript:
+- `action` is required and must be a non-empty string.
+- `payload` is optional and must be a JSON object when present.
+- `requestId` is optional and must be a non-empty string when present.
+- `metadata` is optional and must be a JSON object when present.
 
-```javascript
-const socket = new WebSocket('ws://127.0.0.1:1337/ws?token=WEBSOCKET_TOKEN&publicKey=WEBSOCKET_PUBLIC_KEY');
+Server responses use:
 
-socket.onopen = () => console.log('Connected to server');
-socket.onmessage = (event) => console.log('Received:', event.data);
-
-socket.send(JSON.stringify({ action: 'echo', payload: { message: 'Hello, WebSocket!' }}));
+```json
+{
+  "status": "success",
+  "payload": {"message": "Echo: Hello"},
+  "requestId": "req-1"
+}
 ```
 
-#### Token and Public Key
+Errors use:
 
-Generate the token and public key on the server side:
+```json
+{
+  "status": "error",
+  "payload": {},
+  "requestId": "req-1",
+  "error": {"code": "unsupported_action", "message": "Action 'x' is not supported."}
+}
+```
+
+Standard error codes:
+
+- `invalid_json`
+- `invalid_message`
+- `unsupported_action`
+- `handler_failed`
+- `authentication_failed`
+- `invalid_control_request`
+
+## Action Handlers
+
+Handlers may be callables or implement `MessageHandlerInterface`.
 
 ```php
-use webnarmin\Cryptor\Cryptor;
+$router->on('sum', static function ($user, $message): ResponseEnvelope {
+    $numbers = $message->getPayload()['numbers'] ?? [];
 
-$cryptor = new Cryptor('websocket-private-key');
-$publicKey = 'websocket-public-key';
-
-$userId = time(); // Or any unique user identifier
-$websocketToken = $cryptor->encrypt($userId, $publicKey);
+    return ResponseEnvelope::success([
+        'result' => is_array($numbers) ? array_sum($numbers) : 0,
+    ]);
+});
 ```
 
-Pass these values to your client-side code for connection.
+Return `null` when no response should be sent. Return `ResponseEnvelope::success([])` when an explicit empty success response should be sent.
 
-### Broadcasting from CLI
+## Authentication
 
-Create a PHP script to broadcast messages from the command line:
+Implement `Authenticator`:
 
 ```php
-<?php
-use GuzzleHttp\Client;
-use webnarmin\AmphpWS\WebsocketControlHttpClient;
-use Psr\Log\NullLogger;
-
-require '../vendor/autoload.php';
-
-$baseUri = 'http://127.0.0.1:8080';
-$authToken = 'control-http-auth-token';
-
-// Create a Guzzle HTTP client instance
-$httpClient = new Client([
-    'base_uri' => $baseUri,
-    'headers' => [
-        'Authorization' => $authToken,
-        'Content-Type' => 'application/json',
-    ],
-]);
-
-$client = new WebsocketControlHttpClient($httpClient, new NullLogger());
-
-// Send a broadcast message
-$success = $client->broadcastText('Hello, everyone!');
-
-if ($success) {
-    echo "Message broadcasted successfully.";
-} else {
-    echo "Failed to broadcast message.";
-}
-
-// Send a targeted message
-$success = $client->sendText(1, 'Hello, User 1!');
-
-if ($success) {
-    echo "Message sent to user 1 successfully.";
-} else {
-    echo "Failed to send message to user 1.";
-}
-
-// Send a binary broadcast message
-$binaryData = file_get_contents('path/to/file');
-$success = $client->broadcastBinary($binaryData);
-
-if ($success) {
-    echo "Binary data broadcasted successfully.";
-} else {
-    echo "Failed to broadcast binary data.";
-}
-
-// Multicast a text message
-$success = $client->multicastText('Hello, selected users!', [1, 2, 3]);
-
-if ($success) {
-    echo "Multicast message sent successfully.";
-} else {
-    echo "Failed to send multicast message.";
-}
-
-// Multicast a binary message
-$binaryData = file_get_contents('path/to/file');
-$success = $client->multicastBinary($binaryData, [1, 2, 3]);
-
-if ($success) {
-    echo "Binary data multicast successfully.";
-} else {
-    echo "Failed to multicast binary data.";
+interface Authenticator
+{
+    public function authenticateControlHttp(Request $request): bool;
+    public function authenticateWebSocket(Request $request): ?WebsocketUser;
 }
 ```
 
-Run this script from the command line to broadcast a message to all connected clients.
+`WebsocketUser::getId()` returns a non-null positive integer. If WebSocket authentication fails, the client is closed with policy violation code `1008`.
 
-## Configuration
+`SimpleAuthenticator` is a minimal HMAC-signed token example. For production systems, implement `Authenticator` against your own session, API token or identity provider.
 
-Configuration options can be set when creating the `Configurator` instance:
+## Gateway
+
+Use `getGateway()` to send messages to authenticated users:
 
 ```php
-$config = [
-    'websocket' => [
-        'host' => '127.0.0.1',
-        'port' => 1337,
-        'use_ssl' => false,
-        'ssl_cert' => null,
-        'ssl_key' => null,
-    ],
-    'allow_origins' => ['*'],
-    'max_connections' => 1000,
-    'max_connections_per_ip' => 10,
-    'timeout' => 60,
-];
-
-$configurator = new Configurator($config);
+$server->getGateway()->sendText(123, 'Hello user');
+$server->getGateway()->multicastText('Hello team', [123, 456]);
+$server->getGateway()->broadcastText('Hello everyone', excludedUserIds: [123]);
 ```
 
-## Contributing
+If a user has no active client, sending is a no-op handled by Amp's gateway. Invalid user ids are rejected with `GatewayException`.
 
-Contributions are welcome! Please feel free to submit a Pull Request.
+## HTTP Control
 
-## License
+Authenticated POST endpoints:
 
-This project is licensed under the MIT License.
+- `/send-text`
+- `/broadcast-text`
+- `/broadcast-binary`
+- `/multicast-text`
+- `/multicast-binary`
+
+Successful response:
+
+```json
+{"status":"success"}
+```
+
+Error response:
+
+```json
+{"status":"error","error":{"code":"invalid_control_request","message":"payload must be a string."}}
+```
+
+Use `WebsocketControlHttpClient` from CLI or workers:
+
+```php
+$result = $client->sendText(123, 'Hello');
+
+if (!$result->isSuccess()) {
+    echo $result->getMessage();
+}
+```
+
+## Lifecycle Hooks
+
+`ServerHooks` supports optional callbacks:
+
+- authenticated: called after a client is authenticated and registered.
+- disconnected: called when a registered client disconnects.
+- invalidMessage: called when inbound JSON/protocol validation fails.
+- unhandledException: called for authentication and handler/runtime failures.
+
+## Examples
+
+- `example/server.php` starts a router-based server.
+- `example/public/index.php` is a browser test client.
+- `example/broadcast_from_cli.php` sends a control HTTP broadcast.
+
+## Quality
+
+```bash
+composer check
+composer cs-check
+```

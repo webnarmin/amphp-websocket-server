@@ -3,6 +3,7 @@
 
 # Ignore PHPUnit cache and test results
 /.phpunit.result.cache
+/.php-cs-fixer.cache
 
 # Ignore system files
 .DS_Store

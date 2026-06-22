@@ -1,25 +1,33 @@
-<?php declare(strict_types=1);
+<?php
+
+declare(strict_types=1);
 
 namespace webnarmin\AmphpWS;
 
-use Amp\Websocket\Server\WebsocketClientGateway;
-use Amp\Websocket\WebsocketClient;
 use Amp\Future;
+use Amp\Websocket\Server\WebsocketClientGateway;
+use Amp\Websocket\Server\WebsocketGateway;
+use Amp\Websocket\WebsocketClient;
 use webnarmin\AmphpWS\Contracts\WebsocketUser;
+use webnarmin\AmphpWS\Exception\GatewayException;
 
 class UserAwareWebsocketClientGateway
 {
-    private WebsocketClientGateway $gateway;
+    private WebsocketGateway $gateway;
+    /** @var array<int, int> */
     private array $clientUserMap = [];
+    /** @var array<int, WebsocketUser> */
     private array $clientMap = [];
 
-    public function __construct(WebsocketClientGateway $gateway)
+    public function __construct(?WebsocketGateway $gateway = null)
     {
-        $this->gateway = $gateway;
+        $this->gateway = $gateway ?? new WebsocketClientGateway();
     }
 
     public function addClient(WebsocketClient $client, WebsocketUser $user): void
     {
+        $this->assertValidUserId($user->getId());
+
         $this->gateway->addClient($client);
         $this->clientUserMap[$client->getId()] = $user->getId();
         $this->clientMap[$client->getId()] = $user;
@@ -42,6 +50,8 @@ class UserAwareWebsocketClientGateway
 
     public function getClientIdsByUserId(int $userId): array
     {
+        $this->assertValidUserId($userId);
+
         return array_keys($this->clientUserMap, $userId, true);
     }
 
@@ -59,22 +69,28 @@ class UserAwareWebsocketClientGateway
 
     public function multicastText(string $data, array $userIds): Future
     {
+        $this->assertValidUserIds($userIds);
+
         $clientIds = $this->getUserClientIds($userIds);
+
         return $this->gateway->multicastText($data, $clientIds);
     }
 
     public function multicastBinary(string $data, array $userIds): Future
     {
+        $this->assertValidUserIds($userIds);
+
         $clientIds = $this->getUserClientIds($userIds);
+
         return $this->gateway->multicastBinary($data, $clientIds);
     }
 
-    public function sendText(string $data, int $userId): Future
+    public function sendText(int $userId, string $data): Future
     {
         return $this->multicastText($data, [$userId]);
     }
 
-    public function sendBinary(string $data, int $userId): Future
+    public function sendBinary(int $userId, string $data): Future
     {
         return $this->multicastBinary($data, [$userId]);
     }
@@ -84,17 +100,39 @@ class UserAwareWebsocketClientGateway
         return $this->gateway->getClients();
     }
 
-    public function getOrignalGateway(): WebsocketClientGateway
+    public function getOriginalGateway(): WebsocketGateway
     {
         return $this->gateway;
     }
 
     private function getUserClientIds(array $userIds): array
     {
+        $this->assertValidUserIds($userIds);
+
         $clientIds = [];
         foreach ($userIds as $userId) {
             $clientIds = array_merge($clientIds, $this->getClientIdsByUserId($userId));
         }
+
         return $clientIds;
+    }
+
+    /**
+     * @param array<int, mixed> $userIds
+     */
+    private function assertValidUserIds(array $userIds): void
+    {
+        foreach ($userIds as $userId) {
+            if (!is_int($userId) || $userId <= 0) {
+                throw new GatewayException('User ids must be positive integers.');
+            }
+        }
+    }
+
+    private function assertValidUserId(int $userId): void
+    {
+        if ($userId <= 0) {
+            throw new GatewayException('User id must be a positive integer.');
+        }
     }
 }
